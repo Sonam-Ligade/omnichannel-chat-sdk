@@ -832,10 +832,47 @@ class OmnichannelChatSDK {
                 //     return this.chatToken.token as string;
                 // };
 
+                let tokenRefreshPromise: Promise<string> | null = null;
+                const tokenRefresher = async(): Promise<string> => {
+
+                    if (this.chatToken && this.chatToken.token && this.chatToken.expiresIn && new Date(this.chatToken.expiresIn).getTime() > Date.now()) {
+                        return this.chatToken.token;
+                    }
+                    if (tokenRefreshPromise) {
+                        // wait for the ongoing refresh to complete
+                        return tokenRefreshPromise;
+                    }
+                    tokenRefreshPromise = (async () => {
+                        try {
+                            await this.getChatToken(false, { refreshToken: true });
+                            const amsClient = await this.getAMSClient();
+                            await amsClient?.initialize({ chatToken: this.chatToken as OmnichannelChatToken });
+                            this.scenarioMarker.completeScenario(TelemetryEvent.RefreshToken);
+                            return this.chatToken.token as string;
+                        } catch (error) {
+                            const exceptionDetails: ChatSDKExceptionDetails = {
+                                response: "Failed to refresh chat token.",
+                                errorObject: `${error}`
+                            };
+                            this.scenarioMarker.failScenario(TelemetryEvent.RefreshToken, {
+                                RequestId: this.requestId,
+                                ChatId: this.chatToken.chatId as string,
+                                ExceptionDetails: JSON.stringify(exceptionDetails)
+                            });
+                            throw error;
+                        } finally {
+                            tokenRefreshPromise = null;
+                        }
+                    })();
+
+                    return tokenRefreshPromise;
+                }
+
                 try {
                     await this.ACSClient?.initialize({
                         token: chatAdapterConfig.token as string,
                         environmentUrl: chatAdapterConfig.environmentUrl,
+                        tokenRefresher
                     });
                 } catch (error) {
                     const telemetryData = {

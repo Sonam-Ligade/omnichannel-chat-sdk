@@ -46,6 +46,7 @@ enum TelemetryEvent {
     StartPolling = "StartPolling",
     StopPolling = "StopPolling",
     MessageReceived = "MessageReceived",
+    RefreshToken = "RefreshToken",
 }
 
 export default TelemetryEvent;
