@@ -834,13 +834,13 @@ class OmnichannelChatSDK {
 
                 let tokenRefreshPromise: Promise<string> | null = null;
                 const tokenRefresher = async(): Promise<string> => {
+                    const isTokenValid = this.chatToken?.token && this.chatToken.expiresIn && new Date(this.chatToken.expiresIn).getTime() > Date.now();
 
-                    if (this.chatToken && this.chatToken.token && this.chatToken.expiresIn && new Date(this.chatToken.expiresIn).getTime() > Date.now()) {
-                        return this.chatToken.token;
+                    if (isTokenValid) {
+                        return this.chatToken.token as string;
                     }
                     if (tokenRefreshPromise) {
-                        // wait for the ongoing refresh to complete
-                        return tokenRefreshPromise;
+                        return tokenRefreshPromise; // wait for the ongoing refresh to complete
                     }
                     tokenRefreshPromise = (async () => {
                         try {

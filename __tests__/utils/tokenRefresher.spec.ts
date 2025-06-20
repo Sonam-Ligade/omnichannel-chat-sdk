@@ -1,100 +1,263 @@
+/* eslint-disable @typescript-eslint/no-var-requires */
+const OmnichannelChatSDK = require('../../src/OmnichannelChatSDK').default;
 
-import { jest } from '@jest/globals';
-import IChatToken from '../../src/external/IC3Adapter/IChatToken';
- interface AMSClient {
-        initialize: (initConfig: { chatToken: { token: string } }) => Promise<void>;
-    }
 describe('tokenRefresher', () => {
-    let tokenRefresher: () => Promise<string>;
-    let tokenRefreshPromise: Promise<string> | null = null;
-    let getChatTokenMock: jest.MockedFunction<(cached: boolean, optionParams: { refreshToken: boolean }) => Promise<IChatToken>>;
-
-    type GetAMSClientFn = () => Promise<AMSClient>;
-    let getAMSClientMock: jest.MockedFunction<GetAMSClientFn>;
-    let chatToken: IChatToken | null = null;
+    const omnichannelConfig = {
+        orgUrl: '[data-org-url]',
+        orgId: '[data-org-id]',
+        widgetId: '[data-app-id]'
+    };
 
     beforeEach(() => {
         jest.clearAllMocks();
-        chatToken = null;
-        tokenRefreshPromise = null;
-        // Mock getChatToken to return a dummy token
-        getChatTokenMock = jest.fn<() => Promise<IChatToken>>().mockResolvedValue({
-            token: "mocked-token",
-            expiresIn: new Date(Date.now() + 60 * 1000).toISOString(),
-        });
-
-        // Mock getAMSClient to return an object with an initialize function
-        getAMSClientMock = jest.fn<GetAMSClientFn>().mockResolvedValue({
-            initialize: jest.fn<AMSClient["initialize"]>().mockResolvedValue(undefined),
-        });
-        // Replace actual functions with mocks
-        tokenRefresher = async (): Promise<string> => {
-            if (chatToken && chatToken.token && chatToken.expiresIn && new Date(chatToken.expiresIn).getTime() > Date.now()) {
-                return chatToken.token;
-            }
-            if (tokenRefreshPromise) {
-                return tokenRefreshPromise;
-            }
-
-            tokenRefreshPromise = (async () => {
-                try {
-                    chatToken = await getChatTokenMock(false, { refreshToken: true });
-                    const amsClient: AMSClient = await getAMSClientMock();
-                    await amsClient.initialize({ chatToken: { token: "mocked-token" } });
-                    return "mocked-token";
-                } catch (error) {
-                    console.error("Failed to refresh chat token:", error);
-                    throw error;
-                } finally {
-                    tokenRefreshPromise = null;
-                }
-            })();
-
-            return tokenRefreshPromise;
-        };
     });
 
-    it('should refresh token successfully', async () => {
+    it('tokenRefresher should refresh token if expired at ACSClient.initialize', async () => {
+        const expiredToken = 'expired-token';
+        const refreshedToken = 'refreshed-token';
+
+        const chatSDK = new OmnichannelChatSDK(omnichannelConfig, {
+            useCreateConversation: { disable: true }
+        });
+        chatSDK.getChatConfig = jest.fn();
+        chatSDK['isAMSClientAllowed'] = true;
+        await chatSDK.initialize();
+
+        jest.spyOn(chatSDK.OCClient, 'getChatToken')
+            .mockResolvedValueOnce({
+                ChatId: '',
+                Token: expiredToken,
+                ExpiresIn: new Date(Date.now() - 10000).toISOString(),
+                RegionGtms: '{}',
+                ACSEndpoint: ''
+            })
+            .mockResolvedValueOnce({
+                ChatId: '',
+                Token: refreshedToken,
+                ExpiresIn: new Date(Date.now() + 60000).toISOString(),
+                RegionGtms: '{}',
+                ACSEndpoint: ''
+            });
+
+        jest.spyOn(chatSDK.OCClient, 'sessionInit').mockResolvedValue(Promise.resolve());
+        jest.spyOn(chatSDK.AMSClient, 'initialize').mockResolvedValue(Promise.resolve());
+        let acsInitConfig: any = undefined;
+        jest.spyOn(chatSDK.ACSClient, 'initialize').mockImplementation(async (config) => {
+            acsInitConfig = config;
+        });
+        jest.spyOn(chatSDK.ACSClient, 'joinConversation').mockResolvedValue(Promise.resolve());
+
+        await chatSDK.startChat();
+
+        //ACSClient.initialize with the expired token
+        expect(chatSDK.ACSClient.initialize).toHaveBeenCalled();
+        expect(acsInitConfig.token).toBe(expiredToken);
+        expect(typeof acsInitConfig.tokenRefresher).toBe('function');
+
+        // Call to tokenRefresher
+        const newToken = await acsInitConfig.tokenRefresher();
+        expect(newToken).toBe(refreshedToken);
+        expect(expiredToken).not.toBe(newToken);
+
+        // OCClient.getChatToken with refresh=true
+        expect(chatSDK.OCClient.getChatToken).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ refreshToken: true }));
+        expect(chatSDK.OCClient.getChatToken).toHaveBeenCalledTimes(2);
+        expect(chatSDK.OCClient.sessionInit).toHaveBeenCalledTimes(1);
+        expect(chatSDK.ACSClient.initialize).toHaveBeenCalledTimes(1);
+        expect(chatSDK.ACSClient.joinConversation).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not call tokenRefresher if token is still valid', async () => {
+        const validToken = 'valid-token';
+
+        const chatSDK = new OmnichannelChatSDK(omnichannelConfig, {
+            useCreateConversation: { disable: true }
+        });
+        chatSDK.getChatConfig = jest.fn();
+        chatSDK['isAMSClientAllowed'] = true;
+        await chatSDK.initialize();
+
+        // Only one mock for initial token, which is valid
+        const getChatTokenSpy = jest.spyOn(chatSDK.OCClient, 'getChatToken')
+            .mockResolvedValueOnce({
+                ChatId: 'chatid',
+                Token: validToken,
+                ExpiresIn: new Date(Date.now() + 60000).toISOString(),
+                RegionGtms: '{}',
+                ACSEndpoint: 'endpoint'
+            });
+
+        jest.spyOn(chatSDK.OCClient, 'sessionInit').mockResolvedValue(Promise.resolve());
+        jest.spyOn(chatSDK.AMSClient, 'initialize').mockResolvedValue(Promise.resolve());
+
+        let acsInitConfig: any = undefined;
+        jest.spyOn(chatSDK.ACSClient, 'initialize').mockImplementation(async (config) => {
+            acsInitConfig = config;
+        });
+        jest.spyOn(chatSDK.ACSClient, 'joinConversation').mockResolvedValue(Promise.resolve());
+
+        await chatSDK.startChat();
+
+        const tokenRefresher = acsInitConfig.tokenRefresher;
+
+        // Call the tokenRefresher while the token is still valid
         const token = await tokenRefresher();
-        expect(token).toBe("mocked-token");
-        expect(getChatTokenMock).toHaveBeenCalledTimes(1);
-        expect(getAMSClientMock).toHaveBeenCalledTimes(1);
+
+        // Should return the cached token, no additional getChatToken call
+        expect(token).toBe(validToken);
+        expect(getChatTokenSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('should return same promise for concurrent calls', async () => {
-        const promise1 = tokenRefresher();
-        const promise2 = tokenRefresher();
+    it('tokenRefresher should return same promise for concurrent calls to tokenRefresher', async () => {
+        const expiredToken = 'expired-token';
+        const refreshedToken = 'refreshed-token';
 
-        await promise1;
-        await promise2;
-        expect(getChatTokenMock).toHaveBeenCalledTimes(1);
-    });
-
-    it('should return a new token after expiry', async () => {
-        jest.useFakeTimers();
-
-        const promise1 = tokenRefresher();
-        await jest.advanceTimersByTimeAsync(61000);
-        const promise2 = tokenRefresher();
-        await promise1;
-        await promise2;
-        expect(getChatTokenMock).toHaveBeenCalledTimes(2);
-
-        jest.useRealTimers();
-    });
-
-    it('should handle token refresh failures', async () => {
-        getChatTokenMock.mockRejectedValue(new Error("Token fetch failed"));
-        await expect(tokenRefresher()).rejects.toThrow("Token fetch failed");
-        expect(tokenRefreshPromise).toBeNull();
-    });
-
-    it('should handle initialization failures', async () => {
-        getAMSClientMock = jest.fn<() => Promise<AMSClient>>().mockResolvedValue({
-            initialize: jest.fn(() => Promise.reject(new Error("Initialization failed"))),
+        const chatSDK = new OmnichannelChatSDK(omnichannelConfig, {
+            useCreateConversation: { disable: true }
         });
+        chatSDK.getChatConfig = jest.fn();
+        chatSDK['isAMSClientAllowed'] = true;
+        await chatSDK.initialize();
+        jest.spyOn(chatSDK.OCClient, 'getChatToken')
+            .mockResolvedValueOnce({
+                ChatId: '',
+                Token: expiredToken,
+                ExpiresIn: new Date(Date.now() - 10000).toISOString(),
+                RegionGtms: '{}',
+                ACSEndpoint: ''
+            })
+            .mockResolvedValueOnce({
+                ChatId: '',
+                Token: refreshedToken,
+                ExpiresIn: new Date(Date.now() + 60000).toISOString(),
+                RegionGtms: '{}',
+                ACSEndpoint: ''
+            });
 
-        await expect(tokenRefresher()).rejects.toThrow("Initialization failed");
-        expect(tokenRefreshPromise).toBeNull();
+        jest.spyOn(chatSDK.OCClient, 'sessionInit').mockResolvedValue(Promise.resolve());
+        jest.spyOn(chatSDK.AMSClient, 'initialize').mockResolvedValue(Promise.resolve());
+
+        let acsInitConfig: any = undefined;
+        jest.spyOn(chatSDK.ACSClient, 'initialize').mockImplementation(async (config) => {
+            acsInitConfig = config;
+        });
+        jest.spyOn(chatSDK.ACSClient, 'joinConversation').mockResolvedValue(Promise.resolve());
+
+        await chatSDK.startChat();
+
+        const tokenRefresher = acsInitConfig.tokenRefresher;
+
+        // Call tokenRefresher concurrently
+        const promise1 = tokenRefresher();
+        const promise2 = tokenRefresher();
+
+        const [token1, token2] = await Promise.all([promise1, promise2]);
+        expect(token1).toBe(token2);
+        expect(token1).toBe(refreshedToken);
+        expect(chatSDK.OCClient.getChatToken).toHaveBeenCalledTimes(2); // One for expired, one for refresh
+    });
+
+    it('tokenRefresher should return a new token after expiry', async () => {
+        const expiredToken = 'expired-token';
+        const refreshedToken1 = 'refreshed-token-1';
+        const refreshedToken2 = 'refreshed-token-2';
+
+        const chatSDK = new OmnichannelChatSDK(omnichannelConfig, {
+            useCreateConversation: { disable: true }
+        });
+        chatSDK.getChatConfig = jest.fn();
+        chatSDK['isAMSClientAllowed'] = true;
+        await chatSDK.initialize();
+
+        jest.spyOn(chatSDK.OCClient, 'getChatToken')
+            .mockResolvedValueOnce({
+                ChatId: '',
+                Token: expiredToken,
+                ExpiresIn: new Date(Date.now() - 10000).toISOString(),
+                RegionGtms: '{}',
+                ACSEndpoint: ''
+            })
+            .mockResolvedValueOnce({
+                ChatId: '',
+                Token: refreshedToken1,
+                ExpiresIn: new Date(Date.now() + 1000).toISOString(), // almost expired
+                RegionGtms: '{}',
+                ACSEndpoint: ''
+            })
+            .mockResolvedValueOnce({
+                ChatId: '',
+                Token: refreshedToken2,
+                ExpiresIn: new Date(Date.now() + 60000).toISOString(),
+                RegionGtms: '{}',
+                ACSEndpoint: ''
+            });
+
+        jest.spyOn(chatSDK.OCClient, 'sessionInit').mockResolvedValue(Promise.resolve());
+        jest.spyOn(chatSDK.AMSClient, 'initialize').mockResolvedValue(Promise.resolve());
+
+        let acsInitConfig: any = undefined;
+        jest.spyOn(chatSDK.ACSClient, 'initialize').mockImplementation(async (config) => {
+            acsInitConfig = config;
+        });
+        jest.spyOn(chatSDK.ACSClient, 'joinConversation').mockResolvedValue(Promise.resolve());
+
+        await chatSDK.startChat();
+
+        const tokenRefresher = acsInitConfig.tokenRefresher;
+
+        // First refresh, should return refreshedToken1
+        const token1 = await tokenRefresher();
+        expect(token1).toBe(refreshedToken1);
+
+        // adjust token expiry
+        chatSDK['chatToken'].expiresIn = new Date(Date.now() - 10000).toISOString();
+
+        // Next call, should trigger another refresh and get refreshedToken2
+        const token2 = await tokenRefresher();
+        expect(token2).toBe(refreshedToken2);
+
+        expect(chatSDK.OCClient.getChatToken).toHaveBeenCalledTimes(3);
+    });
+
+    it('tokenRefresher should handle token refresh failures', async () => {
+        const expiredToken = 'expired-token';
+
+        const chatSDK = new OmnichannelChatSDK(omnichannelConfig, {
+            useCreateConversation: { disable: true }
+        });
+        chatSDK.getChatConfig = jest.fn();
+        chatSDK['isAMSClientAllowed'] = true;
+        await chatSDK.initialize();
+
+        jest.spyOn(chatSDK.OCClient, 'getChatToken')
+            .mockResolvedValueOnce({
+                ChatId: '',
+                Token: expiredToken,
+                ExpiresIn: new Date(Date.now() - 10000).toISOString(),
+                RegionGtms: '{}',
+                ACSEndpoint: ''
+            })
+            .mockRejectedValueOnce(new Error('Token fetch failed'));
+
+        jest.spyOn(chatSDK.OCClient, 'sessionInit').mockResolvedValue(Promise.resolve());
+        jest.spyOn(chatSDK.AMSClient, 'initialize').mockResolvedValue(Promise.resolve());
+
+        let acsInitConfig: any = undefined;
+        jest.spyOn(chatSDK.ACSClient, 'initialize').mockImplementation(async (config) => {
+            acsInitConfig = config;
+        });
+        jest.spyOn(chatSDK.ACSClient, 'joinConversation').mockResolvedValue(Promise.resolve());
+
+        await chatSDK.startChat();
+
+        const tokenRefresher = acsInitConfig.tokenRefresher;
+
+        // tokenRefresher to throw an error
+        await expect(tokenRefresher()).rejects.toMatchObject({
+            message: 'ChatTokenRetrievalFailure',
+            exceptionDetails: expect.objectContaining({
+                errorObject: expect.stringContaining('Token fetch failed')
+            })
+        });
     });
 });
