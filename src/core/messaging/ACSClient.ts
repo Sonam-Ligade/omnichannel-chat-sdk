@@ -18,6 +18,7 @@ import OmnichannelMessage from "./OmnichannelMessage";
 import TelemetryEvent from "../../telemetry/TelemetryEvent";
 import createOmnichannelMessage from "../../utils/createOmnichannelMessage";
 import { defaultMessageTags } from "./MessageTags";
+import { AbortSignalLike } from "@azure/abort-controller";
 
 enum ACSClientEvent {
     InitializeACSClient = 'InitializeACSClient',
@@ -460,9 +461,10 @@ class ACSClient {
     public async initialize(acsClientConfig: ACSClientConfig): Promise<void> {
         this.logger?.startScenario(ACSClientEvent.InitializeACSClient);
 
-        const tokenRefresher = async () => {
+        const tokenRefresher = async (abortSignal?: AbortSignalLike) => {
             if (acsClientConfig.tokenRefresher) {
-                const token = await acsClientConfig.tokenRefresher();
+                console.log("ACSClient: Calling tokenRefresher to get a new token");
+                const token = await acsClientConfig.tokenRefresher(abortSignal);
                 return token;
             }
 

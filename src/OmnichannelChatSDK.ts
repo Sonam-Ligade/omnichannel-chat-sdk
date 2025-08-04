@@ -112,6 +112,7 @@ import stopPolling from "./commands/stopPolling";
 import urlResolvers from "./utils/urlResolvers";
 import validateOmnichannelConfig from "./validators/OmnichannelConfigValidator";
 import { retrieveRegionBasedUrl, shouldUseFramedMode } from "./utils/AMSClientUtils";
+import { AbortSignalLike } from "@azure/abort-controller/types/src/AbortSignal";
 
 class OmnichannelChatSDK {
     private debug: boolean;
@@ -162,6 +163,7 @@ class OmnichannelChatSDK {
     private debugAMS = false;
     private debugACS = false;
     private detailedDebugEnabled = false;
+    private controller = new AbortController();
 
     constructor(omnichannelConfig: OmnichannelConfig, chatSDKConfig: ChatSDKConfig = defaultChatSDKConfig) {
         this.debug = false;
@@ -832,43 +834,72 @@ class OmnichannelChatSDK {
                 //     return this.chatToken.token as string;
                 // };
 
-                let tokenRefreshPromise: Promise<string> | null = null;
-                const tokenRefresher = async(): Promise<string> => {
-                    const isTokenValid = this.chatToken?.token && this.chatToken.expiresIn && new Date(this.chatToken.expiresIn).getTime() > Date.now();
+                const tokenRefresher = async(abortSignal?: AbortSignalLike): Promise<string> => {
+                    let retryAttempt = 0;
+                    const maxBackoffSeconds = 60;
+                    const numberOfTries = 3;
+                    const sleep = (ms: number) => (new Promise((resolve) => {setTimeout(resolve, ms)}));
+                    // const isAborted = (abortSignal && abortSignal.aborted === true) || this.controller.signal.aborted;
 
-                    if (isTokenValid) {
-                        return this.chatToken.token as string;
+                    const isAborted = () => abortSignal?.aborted || this.controller?.signal?.aborted;
+                    console.log("Starting token refresh process...");
+
+                    // Check if the abort signal is already aborted
+                    if (isAborted()) {
+                        console.log("Token refresh process cancelled: signal is aborted.");
                     }
-                    if (tokenRefreshPromise) {
-                        return tokenRefreshPromise; // wait for the ongoing refresh to complete
+                    // Check if the conversation is closed or wrapped up
+                    try {
+                        const conversationDetails = await this.getConversationDetails();
+                        if (Object.keys(conversationDetails).length === 0 ||
+                            conversationDetails.state === LiveWorkItemState.WrapUp ||
+                            conversationDetails.state === LiveWorkItemState.Closed) {
+                            this.controller.abort();
+                            console.log("Token refresh process cancelled: conversation is closed or wrapped up.");
+                        }
+                    } catch (error) {
+                        console.error("Failed to fetch conversation details:", error);
+                        this.controller.abort();
+                        // throw an error
                     }
-                    tokenRefreshPromise = (async () => {
+
+                    while (retryAttempt < numberOfTries) {
                         try {
-                            await this.getChatToken(false, { refreshToken: true });
+                            if (isAborted()) {
+                                console.log("Token refresh process cancelled: signal is aborted.");
+                            }
+                            const expiredToken = this.chatToken.token as string;
+                            const refreshedTokenObj = await this.getChatToken();
                             const amsClient = await this.getAMSClient();
                             await amsClient?.initialize({ chatToken: this.chatToken as OmnichannelChatToken });
-                            this.scenarioMarker.completeScenario(TelemetryEvent.RefreshToken);
-                            return this.chatToken.token as string;
-                        } catch (error) {
-                            const exceptionDetails: ChatSDKExceptionDetails = {
-                                response: "Failed to refresh chat token.",
-                                errorObject: `${error}`
-                            };
-                            this.scenarioMarker.failScenario(TelemetryEvent.RefreshToken, {
-                                RequestId: this.requestId,
-                                ChatId: this.chatToken.chatId as string,
-                                ExceptionDetails: JSON.stringify(exceptionDetails)
-                            });
-                            throw error;
-                        } finally {
-                            tokenRefreshPromise = null;
-                        }
-                    })();
 
-                    return tokenRefreshPromise;
-                }
+                            console.log(`Chat token refreshed successfully: ${refreshedTokenObj.token}`);
+                            if (expiredToken !== refreshedTokenObj.token) {
+                                return refreshedTokenObj.token as string;
+                            }
+                            console.warn("Refreshed token is the same as the expired token, retrying...");
+                        } catch (error) {
+                            console.warn(`Token refresh attempt ${retryAttempt + 1} failed, retrying...`);
+                        }
+                        retryAttempt++;
+
+                        if (retryAttempt >= numberOfTries) {
+                            this.controller.abort();
+                            console.error("Token refresh process cancelled: maximum retry attempts reached.");
+                            throw new Error("Aborting...Token refresh failed after all retry attempts.");
+                        }
+                        const exponentialBackoffWaitTime = Math.min((2 * retryAttempt) + Math.random(), maxBackoffSeconds) * 1000;
+                        console.log(`Retrying after ${Math.round(exponentialBackoffWaitTime / 1000)} seconds...`);
+                        await sleep(exponentialBackoffWaitTime);
+                    }
+                    // Fallback safety
+                    throw new Error("Token refresh failed with unknown issue");
+                };
+
+                // tokenRefresher(this.controller.signal);
 
                 try {
+                    console.log("Initializing ACSClient...");
                     await this.ACSClient?.initialize({
                         token: chatAdapterConfig.token as string,
                         environmentUrl: chatAdapterConfig.environmentUrl,
